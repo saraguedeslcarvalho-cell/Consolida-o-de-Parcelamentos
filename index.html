@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Extrator de Parcelamentos PDF para Excel</title>
   
-  <!-- Bibliotecas externas (PDF.js e SheetJS/XLSX) -->
+  <!-- Bibliotecas externas -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   
@@ -62,8 +62,8 @@
 <body>
 
   <div class="card">
-    <h2>Extrator de Parcelamentos e Tributos</h2>
-    <p>Selecione até 50 PDFs de parcelamento para consolidar todas as linhas em uma planilha no formato exato da base do e-CAC.</p>
+    <h2>Extrator de Parcelamentos RFB (e-CAC)</h2>
+    <p>Selecione até 50 PDFs de parcelamento para converter em planilha Excel única e organizada.</p>
     
     <div class="input-group">
       <label for="pdfFiles"><strong>Escolha os arquivos PDF:</strong></label><br>
@@ -74,7 +74,7 @@
 
     <div id="status"></div>
     <div class="note">
-      🔒 Processamento 100% local no seu navegador. Nenhum dado é enviado para a internet.
+      🔒 Processamento 100% local no seu navegador. Nenhum arquivo é enviado para servidores externos.
     </div>
   </div>
 
@@ -101,88 +101,87 @@
 
       for (let i = 0; i < input.files.length; i++) {
         const file = input.files[i];
-        status.innerText = `⏳ Processando PDF ${i + 1} de ${input.files.length}: ${file.name}...`;
+        status.innerText = `⏳ Lendo PDF ${i + 1} de ${input.files.length}: ${file.name}...`;
 
         try {
           const arrayBuffer = await file.arrayBuffer();
           const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
           
-          let parcelamentoNum = "Não identificado";
+          let rawText = "";
 
+          // Extrai todo o texto contínuo do PDF
           for (let p = 1; p <= pdf.numPages; p++) {
             const page = await pdf.getPage(p);
             const textContent = await page.getTextContent();
-            
-            // Agrupa textos por posição Y (linhas do documento)
-            const linesMap = {};
-            textContent.items.forEach(item => {
-              const y = Math.round(item.transform[5]);
-              if (!linesMap[y]) linesMap[y] = [];
-              linesMap[y].push(item);
-            });
+            const pageText = textContent.items.map(item => item.str).join("\n");
+            rawText += pageText + "\n";
+          }
 
-            // Ordena as linhas de cima para baixo
-            const sortedYs = Object.keys(linesMap).sort((a, b) => b - a);
-            
-            sortedYs.forEach(y => {
-              // Ordena os itens da linha da esquerda para a direita
-              const lineItems = linesMap[y].sort((a, b) => a.transform[4] - b.transform[4]);
-              const tokens = lineItems.map(item => item.str.trim()).filter(Boolean);
-              const fullTextLine = tokens.join(" ");
+          // 1. Identifica o Código do Recibo/Parcelamento (Ex: 739452353402259)
+          let numParcelamento = "Não identificado";
+          const matchRecibo = rawText.match(/Código de controle do recibo:\s*(\d+)/i) || 
+                              rawText.match(/(\d{15})/);
+          if (matchRecibo) {
+            numParcelamento = matchRecibo[1];
+          }
 
-              // Procura o número do parcelamento no cabeçalho ou rodapé
-              if (parcelamentoNum === "Não identificado") {
-                const matchNumber = fullTextLine.match(/\b\d{10,20}\b/);
-                if (matchNumber && !fullTextLine.includes('/')) {
-                  parcelamentoNum = matchNumber[0];
+          // 2. Trata quebras de linha indesejadas no CNPJ (ex: 03.518.763\n/0001-17)
+          const cleanText = rawText.replace(/(\d{2}\.\d{3}\.\d{3})\s*\n\s*(\/\d{4}-\d{2})/g, "$1$2");
+
+          // 3. Divide o texto em blocos/linhas limpas
+          const lines = cleanText.split("\n").map(l => l.trim()).filter(Boolean);
+
+          // Regex para identificar código de receita (Ex: 0422-01, 5434-01, 8109-02)
+          const receitaRegex = /^\d{4}-\d{2}$/;
+
+          for (let idx = 0; idx < lines.length; idx++) {
+            if (receitaRegex.test(lines[idx])) {
+              const codigoReceita = lines[idx];
+
+              // Busca retroativa para encontrar o CNPJ do débito mais próximo antes da receita
+              let cnpjDebito = "";
+              for (let k = idx - 1; k >= Math.max(0, idx - 5); k--) {
+                const matchCNPJ = lines[k].match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/);
+                if (matchCNPJ) {
+                  cnpjDebito = matchCNPJ[0];
+                  break;
                 }
               }
 
-              // Identifica linha de débito (geralmente contém um código de receita tipo XXXX-XX e valores)
-              const receitaIndex = tokens.findIndex(t => /^\d{4}-\d{2}$/.test(t));
-              
-              if (receitaIndex !== -1) {
-                const receita = tokens[receitaIndex];
-                
-                // Extrai valores a partir dos tokens da linha
-                const cnpj = tokens.find(t => /^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/.test(t)) || "";
-                const datas = tokens.filter(t => /^\d{2}\/\d{2}\/\d{4}$/.test(t) || /^[a-zç]+\/\d{4}$/i.test(t));
-                const periodoApuracao = datas[0] || "";
-                const vencimento = datas[1] || "";
+              // Pega os próximos elementos que compõem as colunas do débito
+              const periodoApuracao = lines[idx + 1] || "";
+              const vencimento = lines[idx + 2] || "";
+              const saldoOriginario = lines[idx + 3] || "";
+              const principal = lines[idx + 4] || "";
+              const multa = lines[idx + 5] || "";
+              const juros = lines[idx + 6] || "";
+              const valorConsolidado = lines[idx + 7] || "";
 
-                // Busca valores numéricos/monetários
-                const valoresBRL = tokens.filter(t => t.startsWith("BRL") || /^\d{1,3}(\.\d{3})*,\d{2}$/.test(t));
-                
-                // Identifica referência ou processo se existirem
-                const referencia = tokens.find((t, idx) => idx > receitaIndex && /^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/.test(t) && t !== cnpj) || "";
-                const procAdmin = tokens.find(t => t.toLowerCase().includes("proc")) || "";
-
-                allRows.push({
-                  "Nº Parcelamento": parcelamentoNum,
-                  "Código de Receita": receita,
-                  "Período de apuração": periodoApuracao,
-                  "Vencimento": vencimento,
-                  "Saldo originário": valoresBRL[0] || "",
-                  "Principal (BRL)": valoresBRL[1] || "",
-                  "Multa (BRL)": valoresBRL[2] || "",
-                  "Juros (BRL)": valoresBRL[3] || "",
-                  "Valor consolidado (BRL)": valoresBRL[4] || "",
-                  "Processo administrativo": procAdmin,
-                  "CNPJ do débito": cnpj,
-                  "Referência": referencia,
-                  "Arquivo Origem": file.name
-                });
-              }
-            });
+              allRows.push({
+                "Código de Receita": codigoReceita,
+                "Período de apuração": periodoApuracao,
+                "Vencimento": vencimento,
+                "Saldo originário": saldoOriginario,
+                "Principal (BRL)": principal,
+                "Multa (BRL)": multa,
+                "Juros (BRL)": juros,
+                "Valor consolidado (BRL)": valorConsolidado,
+                "Processo administrativo": "",
+                "CNPJ do débito": cnpjDebito,
+                "Referência": "",
+                "Nº Parcelamento": numParcelamento,
+                "Arquivo Origem": file.name
+              });
+            }
           }
 
         } catch (err) {
-          console.error(`Erro ao processar o arquivo ${file.name}:`, err);
+          console.error(`Erro ao processar ${file.name}:`, err);
         }
       }
 
       if (allRows.length === 0) {
-        status.innerText = "❌ Nenhuma linha de tributo foi identificada nos arquivos enviados.";
+        status.innerText = "❌ Nenhuma linha de débito/tributo foi encontrada nos PDFs.";
         btn.disabled = false;
         return;
       }
@@ -190,11 +189,11 @@
       status.innerText = "📊 Gerando planilha Excel...";
       const worksheet = XLSX.utils.json_to_sheet(allRows);
       const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, "Tributos Consolidados");
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Tributos Parcelados");
 
-      XLSX.writeFile(workbook, `Consolidado_Parcelamentos_${new Date().toISOString().slice(0,10)}.xlsx`);
+      XLSX.writeFile(workbook, `Tributos_Consolidados_${new Date().toISOString().slice(0,10)}.xlsx`);
       
-      status.innerText = `✅ Sucesso! Total de ${allRows.length} linhas de tributos extraídas para o Excel.`;
+      status.innerText = `✅ Sucesso! Total de ${allRows.length} linhas de débitos extraídas para o Excel.`;
       btn.disabled = false;
     }
   </script>
