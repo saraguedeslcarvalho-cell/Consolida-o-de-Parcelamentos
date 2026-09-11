@@ -63,7 +63,7 @@
 
   <div class="card">
     <h2>Extrator de Parcelamentos RFB (e-CAC)</h2>
-    <p>Selecione até 50 PDFs de parcelamento para converter em planilha Excel única e organizada.</p>
+    <p>Selecione os PDFs de parcelamento da Receita Federal para converter em uma planilha Excel limpa e organizada.</p>
     
     <div class="input-group">
       <label for="pdfFiles"><strong>Escolha os arquivos PDF:</strong></label><br>
@@ -91,11 +91,6 @@
         return;
       }
 
-      if (input.files.length > 50) {
-        alert("Por favor, selecione no máximo 50 arquivos por vez.");
-        return;
-      }
-
       btn.disabled = true;
       const allRows = [];
 
@@ -109,7 +104,7 @@
           
           let rawText = "";
 
-          // Extrai todo o texto contínuo do PDF
+          // Junta o texto de todas as páginas
           for (let p = 1; p <= pdf.numPages; p++) {
             const page = await pdf.getPage(p);
             const textContent = await page.getTextContent();
@@ -117,30 +112,29 @@
             rawText += pageText + "\n";
           }
 
-          // 1. Identifica o Código do Recibo/Parcelamento (Ex: 739452353402259)
-          let numParcelamento = "Não identificado";
-          const matchRecibo = rawText.match(/Código de controle do recibo:\s*(\d+)/i) || 
-                              rawText.match(/(\d{15})/);
-          if (matchRecibo) {
-            numParcelamento = matchRecibo[1];
+          // 1. Extrai o Número do Parcelamento
+          let numParcelamento = "";
+          const matchParc = rawText.match(/Parcelamento:\s*\|\s*(\d+)/i) || 
+                            rawText.match(/Código de controle do recibo:\s*(\d+)/i) ||
+                            rawText.match(/(\d{15,25})/);
+          if (matchParc) {
+            numParcelamento = matchParc[1];
           }
 
-          // 2. Trata quebras de linha indesejadas no CNPJ (ex: 03.518.763\n/0001-17)
+          // 2. Trata CNPJs divididos por quebras de linha
           const cleanText = rawText.replace(/(\d{2}\.\d{3}\.\d{3})\s*\n\s*(\/\d{4}-\d{2})/g, "$1$2");
-
-          // 3. Divide o texto em blocos/linhas limpas
           const lines = cleanText.split("\n").map(l => l.trim()).filter(Boolean);
 
-          // Regex para identificar código de receita (Ex: 0422-01, 5434-01, 8109-02)
+          // Padrão do código de receita (ex: 0422-01, 0561-07, 1082-01, 5434-01)
           const receitaRegex = /^\d{4}-\d{2}$/;
 
           for (let idx = 0; idx < lines.length; idx++) {
             if (receitaRegex.test(lines[idx])) {
               const codigoReceita = lines[idx];
 
-              // Busca retroativa para encontrar o CNPJ do débito mais próximo antes da receita
+              // Busca CNPJ do débito (para trás)
               let cnpjDebito = "";
-              for (let k = idx - 1; k >= Math.max(0, idx - 5); k--) {
+              for (let k = idx - 1; k >= Math.max(0, idx - 6); k--) {
                 const matchCNPJ = lines[k].match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/);
                 if (matchCNPJ) {
                   cnpjDebito = matchCNPJ[0];
@@ -148,16 +142,38 @@
                 }
               }
 
-              // Pega os próximos elementos que compõem as colunas do débito
-              const periodoApuracao = lines[idx + 1] || "";
-              const vencimento = lines[idx + 2] || "";
-              const saldoOriginario = lines[idx + 3] || "";
-              const principal = lines[idx + 4] || "";
-              const multa = lines[idx + 5] || "";
-              const juros = lines[idx + 6] || "";
-              const valorConsolidado = lines[idx + 7] || "";
+              // Coleta os próximos 12 itens à frente para analisar os padrões dos campos
+              const chunk = lines.slice(idx + 1, idx + 13);
+
+              let periodoApuracao = "";
+              let vencimento = "";
+              let valores = [];
+
+              for (let item of chunk) {
+                // Captura data de vencimento (Formato DD/MM/AAAA)
+                if (/^\d{2}\/\d{2}\/\d{4}$/.test(item)) {
+                  if (!vencimento) vencimento = item;
+                } 
+                // Captura período de apuração (Ex: janeiro/2025, 05/janeiro/2025, dezembro/2024)
+                else if (/[a-z]+\/\d{4}/i.test(item)) {
+                  if (!periodoApuracao) periodoApuracao = item;
+                } 
+                // Captura valores numéricos/monetários
+                else if (/^BRL\s*/i.test(item) || /^\d{1,3}(\.\d{3})*,\d{2}$/.test(item)) {
+                  valores.push(item.replace(/^BRL\s*/i, ""));
+                }
+              }
+
+              // Organiza os 5 valores monetários da tabela e-CAC
+              const saldoOriginario = valores[0] || "";
+              const principal       = valores[1] || "";
+              const multa           = valores[2] || "";
+              const juros           = valores[3] || "";
+              const valorConsolidado= valores[4] || "";
 
               allRows.push({
+                "Nº Parcelamento": numParcelamento,
+                "CNPJ do débito": cnpjDebito,
                 "Código de Receita": codigoReceita,
                 "Período de apuração": periodoApuracao,
                 "Vencimento": vencimento,
@@ -166,10 +182,6 @@
                 "Multa (BRL)": multa,
                 "Juros (BRL)": juros,
                 "Valor consolidado (BRL)": valorConsolidado,
-                "Processo administrativo": "",
-                "CNPJ do débito": cnpjDebito,
-                "Referência": "",
-                "Nº Parcelamento": numParcelamento,
                 "Arquivo Origem": file.name
               });
             }
@@ -181,7 +193,7 @@
       }
 
       if (allRows.length === 0) {
-        status.innerText = "❌ Nenhuma linha de débito/tributo foi encontrada nos PDFs.";
+        status.innerText = "❌ Nenhuma linha de débito encontrada. Verifique se o PDF é um Requerimento de Parcelamento e-CAC.";
         btn.disabled = false;
         return;
       }
@@ -189,11 +201,11 @@
       status.innerText = "📊 Gerando planilha Excel...";
       const worksheet = XLSX.utils.json_to_sheet(allRows);
       const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, "Tributos Parcelados");
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Parcelamentos");
 
-      XLSX.writeFile(workbook, `Tributos_Consolidados_${new Date().toISOString().slice(0,10)}.xlsx`);
+      XLSX.writeFile(workbook, `Parcelamentos_RFB_${new Date().toISOString().slice(0,10)}.xlsx`);
       
-      status.innerText = `✅ Sucesso! Total de ${allRows.length} linhas de débitos extraídas para o Excel.`;
+      status.innerText = `✅ Sucesso! Extraídas ${allRows.length} linhas de débitos para a planilha.`;
       btn.disabled = false;
     }
   </script>
